@@ -1,5 +1,5 @@
 export default typeof definePageConfig === 'function'
   ? definePageConfig({
-      navigationBarTitleText: '禾页健康',
+      navigationBarTitleText: '零健身',
     })
-  : { navigationBarTitleText: '禾页健康' }
+  : { navigationBarTitleText: '零健身' }

@@ -80,7 +80,7 @@ const LoginPage = () => {
           <Salad size={48} color="#ffffff" />
         </View>
         <Text className="block text-foreground text-2xl font-bold">
-          禾页健康
+          零健身
         </Text>
         <Text className="block text-muted-foreground text-sm mt-2 text-center">
           健身 + 健康餐，一站式健康管理平台
