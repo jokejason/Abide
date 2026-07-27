@@ -1,14 +1,34 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common'
 import { getSupabaseClient } from '@/storage/database/supabase-client'
-import { trainingRecords, dishes, users } from '@/storage/database/shared/schema'
+import { trainingRecords, trainingTemplates, dishes, users } from '@/storage/database/shared/schema'
 import { eq, desc } from 'drizzle-orm'
 
-interface Exercise {
-  name: string
-  sets: number
+// 新的多组训练格式
+interface ExerciseSet {
+  set_number: number
+  weight: number
   reps: number
-  weight?: number
-  met?: number
+  completed: boolean
+  completed_at?: string
+}
+
+interface Exercise {
+  exercise_id?: string | null
+  name: string
+  met: number
+  sets: ExerciseSet[]
+}
+
+// 模板动作格式
+interface TemplateExercise {
+  exercise_id?: string | null
+  name: string
+  target_sets: number
+  target_weight: number
+  target_reps: number
+  rest_seconds: number
+  met: number
+  sort_order: number
 }
 
 interface Cardio {
@@ -20,7 +40,7 @@ interface Cardio {
 @Injectable()
 export class TrainingService {
   /**
-   * 创建训练记录
+   * 创建训练记录（支持多动作多组模式）
    */
   async createRecord(
     userId: string,
@@ -28,18 +48,22 @@ export class TrainingService {
       type: 'strength' | 'cardio'
       exercises?: Exercise[]
       cardio?: Cardio
-      duration?: number
+      session_duration?: number
+      template_id?: string
     }
   ) {
     const supabase = getSupabaseClient()
     const today = new Date().toISOString().split('T')[0]
 
-    // 计算消耗卡路里
+    // 计算消耗卡路里和总容量
     let caloriesBurned = 0
+    let totalVolume = 0
+
     if (data.type === 'strength' && data.exercises) {
-      // 力量训练：基于 MET 值计算
-      const durationMinutes = data.duration || 30
-      caloriesBurned = this.calculateStrengthCalories(data.exercises, durationMinutes)
+      // 力量训练：基于 MET 值和实际训练时长计算
+      const result = this.calculateStrengthCaloriesV2(data.exercises, data.session_duration)
+      caloriesBurned = result.calories
+      totalVolume = result.totalVolume
     } else if (data.type === 'cardio' && data.cardio) {
       // 有氧训练：基于时长和心率计算
       caloriesBurned = this.calculateCardioCalories(data.cardio)
@@ -55,6 +79,9 @@ export class TrainingService {
         exercises: data.exercises || null,
         cardio: data.cardio || null,
         calories_burned: caloriesBurned.toString(),
+        session_duration: data.session_duration || null,
+        total_volume: totalVolume.toString(),
+        template_id: data.template_id || null,
       })
       .select()
       .single()
@@ -65,6 +92,65 @@ export class TrainingService {
     }
 
     return record
+  }
+
+  /**
+   * 计算力量训练卡路里（V2 - 基于每组实际训练时长）
+   */
+  private calculateStrengthCaloriesV2(
+    exercises: Exercise[],
+    sessionDuration?: number
+  ): { calories: number; totalVolume: number } {
+    // 获取用户体重
+    let weight = 70 // 默认体重
+
+    let totalCalories = 0
+    let totalVolume = 0
+
+    for (const exercise of exercises) {
+      const completedSets = exercise.sets.filter(s => s.completed)
+      if (completedSets.length === 0) continue
+
+      // 计算该动作的实际训练时长
+      let exerciseDurationMinutes = 5 // 默认 5 分钟
+      if (completedSets.length >= 2) {
+        const firstSetTime = new Date(completedSets[0].completed_at!).getTime()
+        const lastSetTime = new Date(completedSets[completedSets.length - 1].completed_at!).getTime()
+        exerciseDurationMinutes = (lastSetTime - firstSetTime) / 60000
+        if (exerciseDurationMinutes < 1) exerciseDurationMinutes = 1
+      }
+
+      // MET × 体重(kg) × 时长(小时) = 卡路里
+      const met = exercise.met || 6.0
+      const caloriesForExercise = met * weight * (exerciseDurationMinutes / 60)
+      totalCalories += caloriesForExercise
+
+      // 计算总容量（只算完成的组）
+      for (const set of completedSets) {
+        totalVolume += (set.weight || 0) * (set.reps || 0)
+      }
+    }
+
+    return {
+      calories: Math.round(totalCalories),
+      totalVolume: Math.round(totalVolume),
+    }
+  }
+
+  /**
+   * 计算有氧训练卡路里
+   */
+  private calculateCardioCalories(cardio: Cardio): number {
+    const metMap: Record<string, number> = {
+      running: 8,
+      cycling: 6,
+      walking: 3.5,
+      swimming: 7,
+    }
+    const met = metMap[cardio.type] || 5
+    const weight = 70 // 默认体重
+    const durationHours = cardio.duration / 60
+    return Math.round(met * weight * durationHours)
   }
 
   /**
@@ -97,262 +183,203 @@ export class TrainingService {
 
     const { data: records, error } = await supabase
       .from('training_records')
-      .select('calories_burned')
+      .select('calories_burned, session_duration')
       .eq('user_id', userId)
       .eq('date', today)
 
     if (error) {
       console.error('获取今日统计失败:', error)
-      return { count: 0, calories: 0, duration: 0 }
+      throw new Error('获取今日统计失败')
     }
 
-    const count = records?.length || 0
-    const calories = records?.reduce((sum, r) => sum + parseFloat(r.calories_burned || '0'), 0) || 0
+    const totalCalories = records.reduce((sum, r) => sum + parseFloat(r.calories_burned || '0'), 0)
+    const totalDuration = records.reduce((sum, r) => sum + (r.session_duration || 0), 0)
 
-    return { count, calories: Math.round(calories), duration: count * 30 }
-  }
-
-  /**
-   * 内部方法：查询用户完整信息
-   */
-  private async getUserInfo(userId: string) {
-    const supabase = getSupabaseClient()
-    const { data: user, error } = await supabase
-      .from('users')
-      .select('id, gender, age, height, weight, fitness_goal')
-      .eq('id', userId)
-      .single()
-
-    if (error || !user) {
-      console.error('获取用户信息失败:', error)
-      return null
+    return {
+      count: records.length,
+      calories: Math.round(totalCalories),
+      duration: totalDuration,
     }
-    return user
   }
 
   /**
-   * 检查用户是否有完整的身体数据
-   */
-  private hasCompleteBodyData(user: any): boolean {
-    return (
-      user.gender !== null &&
-      user.age !== null &&
-      user.height !== null &&
-      user.weight !== null &&
-      parseFloat(user.height) > 0 &&
-      parseFloat(user.weight) > 0 &&
-      user.age > 0
-    )
-  }
-
-  /**
-   * 根据训练消耗推荐餐食（基于 BMR/TDEE 算法）
-   * 如果用户缺少身体数据，fallback 到简单逻辑
+   * 根据训练消耗推荐餐食
    */
   async recommendDishes(userId: string, caloriesBurned: number) {
     const supabase = getSupabaseClient()
 
-    // 1. 获取用户信息
-    const user = await this.getUserInfo(userId)
-    if (!user) {
-      return this.fallbackRecommend(caloriesBurned)
-    }
+    // 1. 查询用户完整信息
+    const { data: user } = await supabase
+      .from('users')
+      .select('gender, age, height, weight, fitness_goal')
+      .eq('id', userId)
+      .single()
 
-    // 2. 检查是否有完整的身体数据，否则 fallback
-    if (!this.hasCompleteBodyData(user)) {
-      console.log('用户身体数据不完整，使用 fallback 推荐')
-      return this.fallbackRecommend(caloriesBurned)
-    }
+    let targetCalories: number
+    let recommendReason: string
+    let minProtein = 0
 
-    // 3. 计算 BMR（Harris-Benedict 公式）
-    const weight = parseFloat(user.weight)
-    const height = parseFloat(user.height)
-    const age = user.age
-    const gender = user.gender
+    // 2. 检查用户是否有完整的身体数据
+    if (user && user.gender && user.age && user.height && user.weight) {
+      const gender = parseInt(user.gender)
+      const age = parseInt(user.age)
+      const height = parseFloat(user.height)
+      const weight = parseFloat(user.weight)
+      const fitnessGoal = user.fitness_goal || 'body_shape'
 
-    let bmr: number
-    if (gender === 1) {
-      // 男性：88.362 + 13.397 × 体重kg + 4.799 × 身高cm - 5.677 × 年龄
-      bmr = 88.362 + 13.397 * weight + 4.799 * height - 5.677 * age
+      // 3. 计算 BMR（Harris-Benedict 公式）
+      let bmr: number
+      if (gender === 1) {
+        // 男性
+        bmr = 88.362 + 13.397 * weight + 4.799 * height - 5.677 * age
+      } else {
+        // 女性
+        bmr = 447.593 + 9.247 * weight + 3.098 * height - 4.330 * age
+      }
+
+      // 4. 计算 TDEE（中等活动系数 1.55）
+      const tdee = bmr * 1.55
+
+      // 5. 根据训练目的计算目标摄入
+      switch (fitnessGoal) {
+        case 'fat_loss':
+          if (gender === 1) {
+            targetCalories = tdee + caloriesBurned - 500
+            recommendReason = '减脂模式，适度热量缺口'
+          } else {
+            targetCalories = tdee + caloriesBurned - 300
+            recommendReason = '减脂模式，适度热量缺口'
+          }
+          break
+        case 'muscle_gain':
+          targetCalories = tdee + caloriesBurned + 200
+          recommendReason = '增肌模式，高蛋白补充'
+          minProtein = 25
+          break
+        case 'body_shape':
+        default:
+          targetCalories = tdee + caloriesBurned
+          recommendReason = '塑形模式，均衡营养'
+          break
+      }
+
+      // 6. 中餐/晚餐占每日摄入 70%
+      targetCalories = targetCalories * 0.7
     } else {
-      // 女性：447.593 + 9.247 × 体重kg + 3.098 × 身高cm - 4.330 × 年龄
-      bmr = 447.593 + 9.247 * weight + 3.098 * height - 4.330 * age
+      // Fallback: 缺少身体数据，使用旧逻辑
+      targetCalories = caloriesBurned * 0.7
+      recommendReason = '训练后补充'
     }
 
-    // 4. 计算 TDEE（活动系数 1.55，中等活动量）
-    const tdee = bmr * 1.55
-
-    // 5. 根据训练目的计算目标摄入
-    const fitnessGoal = user.fitness_goal || 'body_shape'
-    let dailyTarget: number
-    let preferHighProtein = false
-    let preferLowGI = false
-
-    switch (fitnessGoal) {
-      case 'fat_loss':
-        if (gender === 1) {
-          // 减脂男性：TDEE + 训练消耗 - 500
-          dailyTarget = tdee + caloriesBurned - 500
-        } else {
-          // 减脂女性：TDEE + 训练消耗 - 300
-          dailyTarget = tdee + caloriesBurned - 300
-        }
-        break
-      case 'muscle_gain':
-        // 增肌：TDEE + 训练消耗 + 200，推荐高蛋白菜品
-        dailyTarget = tdee + caloriesBurned + 200
-        preferHighProtein = true
-        break
-      case 'body_shape':
-      default:
-        // 塑形：TDEE + 训练消耗，推荐低GI菜品
-        dailyTarget = tdee + caloriesBurned
-        preferLowGI = true
-        break
-    }
-
-    // 6. 中餐/晚餐占每日摄入的 70%
-    const mealTarget = dailyTarget * 0.7
-
-    // 7. 获取所有上架的菜品
-    const { data: allDishes, error } = await supabase
+    // 7. 从上架的菜品中筛选
+    const { data: allDishes } = await supabase
       .from('dishes')
       .select('*')
       .eq('status', 1)
 
-    if (error || !allDishes) {
-      console.error('获取菜品失败:', error)
-      return this.fallbackRecommend(caloriesBurned)
-    }
-
-    // 8. 优先推荐套餐（category = '套餐'），推荐 2 个
-    const mealPackages = allDishes.filter((d) => d.category === '套餐')
-
-    if (mealPackages.length === 0) {
-      return this.fallbackRecommend(caloriesBurned)
-    }
-
-    // 筛选套餐：根据目标热量和训练目的
-    let recommendedPackages = mealPackages.filter((dish) => {
-      const nutrition = dish.nutrition as { calories?: number; protein?: number } | null
-      const dishCalories = nutrition?.calories || 0
-      // 套餐热量应在单餐目标的 80%-120% 范围内
-      const inCalorieRange = dishCalories >= mealTarget * 0.8 && dishCalories <= mealTarget * 1.2
-
-      if (preferHighProtein) {
-        // 增肌：蛋白质 > 25g
-        const protein = nutrition?.protein || 0
-        return inCalorieRange && protein > 25
-      }
-
-      if (preferLowGI) {
-        // 塑形：优先低脂低糖（碳水 < 40g）
-        const carbs = (nutrition as { carbs?: number })?.carbs || 0
-        return inCalorieRange && carbs < 40
-      }
-
-      return inCalorieRange
-    })
-
-    // 如果没有完全匹配的套餐，选择热量最接近的 2 个
-    if (recommendedPackages.length < 2) {
-      const sortedPackages = mealPackages
-        .map((dish) => ({
-          ...dish,
-          dishCalories: (dish.nutrition as { calories?: number } | null)?.calories || 0,
-          distance: Math.abs(((dish.nutrition as { calories?: number } | null)?.calories || 0) - mealTarget),
-        }))
-        .sort((a, b) => a.distance - b.distance)
-        .slice(0, 2)
-      recommendedPackages = sortedPackages
-    } else {
-      recommendedPackages = recommendedPackages.slice(0, 2)
-    }
-
-    return recommendedPackages.map((dish) => ({
-      ...dish,
-      recommend_reason: this.getRecommendReason(fitnessGoal, dish),
-    }))
-  }
-
-  /**
-   * Fallback 推荐逻辑：当用户数据不完整时使用
-   * 简单根据训练消耗推荐热量匹配的菜品
-   */
-  private async fallbackRecommend(caloriesBurned: number) {
-    const supabase = getSupabaseClient()
-
-    // 推荐热量 = 训练消耗 * 0.7（单餐占比）
-    const targetCalories = caloriesBurned * 0.7
-
-    const { data: allDishes, error } = await supabase
-      .from('dishes')
-      .select('*')
-      .eq('status', 1)
-      .eq('category', '套餐')
-
-    if (error || !allDishes || allDishes.length === 0) {
+    if (!allDishes || allDishes.length === 0) {
       return []
     }
 
-    // 选择热量最接近的 2 个套餐
-    const sorted = allDishes
-      .map((dish) => ({
-        ...dish,
-        distance: Math.abs(((dish.nutrition as { calories?: number } | null)?.calories || 0) - targetCalories),
-      }))
-      .sort((a, b) => a.distance - b.distance)
+    // 8. 如果有蛋白质要求，先筛选高蛋白菜品
+    let candidateDishes = allDishes
+    if (minProtein > 0) {
+      const highProteinDishes = allDishes.filter(d => {
+        const nutrition = d.nutrition as any
+        return nutrition && nutrition.protein && nutrition.protein >= minProtein
+      })
+      if (highProteinDishes.length >= 2) {
+        candidateDishes = highProteinDishes
+      }
+    }
+
+    // 9. 按热量匹配度排序，选择最接近的 2 个
+    const sortedDishes = candidateDishes
+      .map(dish => {
+        const nutrition = dish.nutrition as any
+        const dishCalories = nutrition?.calories || 0
+        const diff = Math.abs(dishCalories - targetCalories)
+        return { ...dish, diff, dishCalories }
+      })
+      .sort((a, b) => a.diff - b.diff)
       .slice(0, 2)
 
-    return sorted.map((dish) => ({
+    return sortedDishes.map(dish => ({
       ...dish,
-      recommend_reason: '根据训练消耗智能推荐',
+      recommend_reason: recommendReason,
     }))
   }
 
-  /**
-   * 获取推荐理由
-   */
-  private getRecommendReason(fitnessGoal: string, dish: any): string {
-    const nutrition = dish.nutrition as { calories?: number; protein?: number; carbs?: number } | null
-    const protein = nutrition?.protein || 0
-    const carbs = nutrition?.carbs || 0
+  // ==================== 训练模板相关方法 ====================
 
-    switch (fitnessGoal) {
-      case 'fat_loss':
-        return '适合减脂期食用，热量控制合理'
-      case 'muscle_gain':
-        if (protein > 25) {
-          return `高蛋白 ${protein}g，助力增肌恢复`
-        }
-        return '营养均衡，适合增肌期'
-      case 'body_shape':
-      default:
-        if (carbs < 40) {
-          return '低GI配方，塑形首选'
-        }
-        return '营养均衡，适合日常塑形'
+  /**
+   * 获取用户训练模板列表
+   */
+  async getUserTemplates(userId: string) {
+    const supabase = getSupabaseClient()
+
+    const { data: templates, error } = await supabase
+      .from('training_templates')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+
+    if (error) {
+      console.error('获取训练模板失败:', error)
+      throw new Error('获取训练模板失败')
     }
+
+    return templates || []
   }
 
   /**
-   * 计算力量训练消耗卡路里
+   * 创建训练模板
    */
-  private calculateStrengthCalories(exercises: Exercise[], durationMinutes: number): number {
-    // 使用 MET 值计算：卡路里 = MET × 体重(kg) × 时间(小时)
-    // 假设体重 70kg，MET 值平均 6.0
-    const avgMet = exercises.reduce((sum, e) => sum + (e.met || 6), 0) / exercises.length
-    const weight = 70 // 默认体重
-    const hours = durationMinutes / 60
-    return Math.round(avgMet * weight * hours)
+  async createTemplate(
+    userId: string,
+    data: {
+      name: string
+      exercises: TemplateExercise[]
+    }
+  ) {
+    const supabase = getSupabaseClient()
+
+    const { data: template, error } = await supabase
+      .from('training_templates')
+      .insert({
+        user_id: userId,
+        name: data.name,
+        exercises: data.exercises,
+      })
+      .select()
+      .single()
+
+    if (error) {
+      console.error('创建训练模板失败:', error)
+      throw new Error('创建训练模板失败')
+    }
+
+    return template
   }
 
   /**
-   * 计算有氧训练消耗卡路里
+   * 获取训练模板详情
    */
-  private calculateCardioCalories(cardio: Cardio): number {
-    // 基于时长计算：每分钟约消耗 8-12 卡路里
-    const caloriesPerMinute = 10
-    return cardio.duration * caloriesPerMinute
+  async getTemplateById(templateId: string, userId: string) {
+    const supabase = getSupabaseClient()
+
+    const { data: template, error } = await supabase
+      .from('training_templates')
+      .select('*')
+      .eq('id', templateId)
+      .eq('user_id', userId)
+      .single()
+
+    if (error) {
+      console.error('获取训练模板失败:', error)
+      throw new Error('获取训练模板失败')
+    }
+
+    return template
   }
 }

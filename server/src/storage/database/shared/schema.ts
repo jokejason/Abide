@@ -67,6 +67,9 @@ export const trainingRecords = pgTable("training_records", {
 	exercises: jsonb(),
 	cardio: jsonb(),
 	caloriesBurned: numeric("calories_burned", { precision: 8, scale:  2 }),
+	sessionDuration: integer("session_duration"),
+	totalVolume: text("total_volume"),
+	templateId: varchar("template_id", { length: 36 }),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
 }, (table) => [
 	index("training_records_date_idx").using("btree", table.date.asc().nullsLast().op("text_ops")),
@@ -78,6 +81,17 @@ export const trainingRecords = pgTable("training_records", {
 			foreignColumns: [users.id],
 			name: "training_records_user_id_users_id_fk"
 		}),
+]);
+
+// ==================== 训练模板表 ====================
+export const trainingTemplates = pgTable("training_templates", {
+	id: uuid().defaultRandom().primaryKey().notNull(),
+	userId: varchar("user_id", { length: 36 }).notNull(),
+	name: text().notNull(),
+	exercises: jsonb().default([]).notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("training_templates_user_id_idx").using("btree", table.userId.asc().nullsLast().op("text_ops")),
 ]);
 
 export const orders = pgTable("orders", {
