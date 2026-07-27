@@ -11,7 +11,7 @@ export default typeof defineAppConfig === 'function'
       window: {
         backgroundTextStyle: 'light',
         navigationBarBackgroundColor: '#00B894',
-        navigationBarTitleText: '禾页健康',
+        navigationBarTitleText: 'Zero Fitness',
         navigationBarTextStyle: 'white',
       },
       tabBar: {
