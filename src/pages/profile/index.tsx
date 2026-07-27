@@ -5,7 +5,8 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Separator } from '@/components/ui/separator'
-import { User, Ruler, Weight, CalendarDays, LogOut, ChevronRight } from 'lucide-react-taro'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { User, Ruler, Weight, CalendarDays, LogOut, ChevronRight, Target } from 'lucide-react-taro'
 import { Network } from '@/network'
 
 interface UserProfile {
@@ -16,11 +17,19 @@ interface UserProfile {
   age: number
   height: string
   weight: string
+  fitness_goal: string
 }
+
+const FITNESS_GOALS = [
+  { value: 'fat_loss', label: '减脂', desc: '降低体脂率' },
+  { value: 'muscle_gain', label: '增肌', desc: '增加肌肉量' },
+  { value: 'body_shape', label: '塑形', desc: '塑造身材线条' },
+]
 
 const ProfilePage = () => {
   const [userInfo, setUserInfo] = useState<UserProfile | null>(null)
   const [isLoggedIn, setIsLoggedIn] = useState(false)
+  const [showGoalDialog, setShowGoalDialog] = useState(false)
 
   useEffect(() => {
     const token = Taro.getStorageSync('token')
@@ -80,6 +89,32 @@ const ProfilePage = () => {
         return '女'
       default:
         return '未设置'
+    }
+  }
+
+  const getFitnessGoalText = (goal: string) => {
+    const found = FITNESS_GOALS.find((g) => g.value === goal)
+    return found ? found.label : '塑形'
+  }
+
+  const handleSelectGoal = async (goal: string) => {
+    try {
+      const res = await Network.request({
+        url: '/api/user/update',
+        method: 'POST',
+        data: { fitness_goal: goal },
+        header: {
+          Authorization: `Bearer ${Taro.getStorageSync('token')}`,
+        },
+      })
+      if (res.data?.code === 200) {
+        setUserInfo((prev) => (prev ? { ...prev, fitness_goal: goal } : prev))
+        Taro.showToast({ title: '已更新训练目标', icon: 'success' })
+        setShowGoalDialog(false)
+      }
+    } catch (err) {
+      console.error('更新训练目标失败:', err)
+      Taro.showToast({ title: '更新失败', icon: 'none' })
     }
   }
 
@@ -191,12 +226,20 @@ const ProfilePage = () => {
               <ChevronRight size={18} color="#B2BEC3" />
             </View>
             <Separator />
-            <View className="flex items-center justify-between p-4">
+            <View
+              className="flex items-center justify-between p-4"
+              onClick={() => setShowGoalDialog(true)}
+            >
               <View className="flex items-center gap-3">
-                <Ruler size={20} color="#FDCB6E" />
+                <Target size={20} color="#E17055" />
                 <Text className="text-foreground text-base">训练目标</Text>
               </View>
-              <ChevronRight size={18} color="#B2BEC3" />
+              <View className="flex items-center gap-2">
+                <Text className="text-sm text-primary font-medium">
+                  {getFitnessGoalText(userInfo?.fitness_goal || 'body_shape')}
+                </Text>
+                <ChevronRight size={18} color="#B2BEC3" />
+              </View>
             </View>
           </CardContent>
         </Card>
@@ -213,6 +256,35 @@ const ProfilePage = () => {
           <Text>退出登录</Text>
         </Button>
       </View>
+
+      {/* 训练目标选择弹窗 */}
+      <Dialog open={showGoalDialog} onOpenChange={setShowGoalDialog}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>选择训练目标</DialogTitle>
+          </DialogHeader>
+          <View className="flex flex-col gap-3 py-4">
+            {FITNESS_GOALS.map((goal) => (
+              <View
+                key={goal.value}
+                className={`flex flex-col p-4 rounded-xl border-2 cursor-pointer transition-all ${
+                  userInfo?.fitness_goal === goal.value
+                    ? 'border-primary bg-primary bg-opacity-5'
+                    : 'border-border bg-card'
+                }`}
+                onClick={() => handleSelectGoal(goal.value)}
+              >
+                <Text className="block text-base font-semibold text-foreground">
+                  {goal.label}
+                </Text>
+                <Text className="block text-sm text-muted-foreground mt-1">
+                  {goal.desc}
+                </Text>
+              </View>
+            ))}
+          </View>
+        </DialogContent>
+      </Dialog>
     </View>
   )
 }

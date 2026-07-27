@@ -22,6 +22,7 @@ export const users = pgTable(
     weight: numeric("weight", { precision: 5, scale: 1 }),
     role: varchar("role", { length: 32 }).default("user").notNull(),
     gym_id: varchar("gym_id", { length: 36 }),
+    fitness_goal: varchar("fitness_goal", { length: 20 }).default("body_shape"),
     status: integer("status").default(1).notNull(),
     created_at: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updated_at: timestamp("updated_at", { withTimezone: true }),

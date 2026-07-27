@@ -1,6 +1,6 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common'
 import { getSupabaseClient } from '@/storage/database/supabase-client'
-import { trainingRecords, dishes } from '@/storage/database/shared/schema'
+import { trainingRecords, dishes, users } from '@/storage/database/shared/schema'
 import { eq, desc } from 'drizzle-orm'
 
 interface Exercise {
@@ -113,45 +113,154 @@ export class TrainingService {
   }
 
   /**
-   * 根据训练消耗推荐餐食
+   * 根据训练消耗推荐餐食（基于 BMR/TDEE 算法）
    */
   async recommendDishes(userId: string, caloriesBurned: number) {
     const supabase = getSupabaseClient()
 
-    // 获取所有上架的菜品
+    // 1. 获取用户信息
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('gender, age, height, weight, fitness_goal')
+      .eq('id', userId)
+      .single()
+
+    if (userError || !user) {
+      console.error('获取用户信息失败:', userError)
+      return []
+    }
+
+    // 2. 计算 BMR（Harris-Benedict 公式）
+    const weight = parseFloat(user.weight || '70')
+    const height = parseFloat(user.height || '170')
+    const age = user.age || 25
+    const gender = user.gender || 1
+
+    let bmr: number
+    if (gender === 1) {
+      // 男性：88.362 + 13.397 × 体重kg + 4.799 × 身高cm - 5.677 × 年龄
+      bmr = 88.362 + 13.397 * weight + 4.799 * height - 5.677 * age
+    } else {
+      // 女性：447.593 + 9.247 × 体重kg + 3.098 × 身高cm - 4.330 × 年龄
+      bmr = 447.593 + 9.247 * weight + 3.098 * height - 4.330 * age
+    }
+
+    // 3. 计算 TDEE（活动系数 1.55，中等活动量）
+    const tdee = bmr * 1.55
+
+    // 4. 根据训练目的计算目标摄入
+    const fitnessGoal = user.fitness_goal || 'body_shape'
+    let dailyTarget: number
+    let preferHighProtein = false
+    let preferLowGI = false
+
+    switch (fitnessGoal) {
+      case 'fat_loss':
+        if (gender === 1) {
+          // 减脂男性：TDEE + 训练消耗 - 500
+          dailyTarget = tdee + caloriesBurned - 500
+        } else {
+          // 减脂女性：TDEE + 训练消耗 - 300
+          dailyTarget = tdee + caloriesBurned - 300
+        }
+        break
+      case 'muscle_gain':
+        // 增肌：TDEE + 训练消耗 + 200，推荐高蛋白菜品
+        dailyTarget = tdee + caloriesBurned + 200
+        preferHighProtein = true
+        break
+      case 'body_shape':
+      default:
+        // 塑形：TDEE + 训练消耗，推荐低GI菜品
+        dailyTarget = tdee + caloriesBurned
+        preferLowGI = true
+        break
+    }
+
+    // 5. 中餐/晚餐占每日摄入的 70%
+    const mealTarget = dailyTarget * 0.7
+
+    // 6. 获取所有上架的菜品
     const { data: allDishes, error } = await supabase
       .from('dishes')
       .select('*')
       .eq('status', 1)
 
     if (error || !allDishes) {
+      console.error('获取菜品失败:', error)
       return []
     }
 
-    // 根据消耗卡路里推荐：推荐热量约为消耗热量的 60%-80% 的餐食
-    const targetCaloriesMin = caloriesBurned * 0.6
-    const targetCaloriesMax = caloriesBurned * 0.8
+    // 7. 优先推荐套餐（category = '套餐'），推荐 2 个
+    const mealPackages = allDishes.filter((d) => d.category === '套餐')
+    const otherDishes = allDishes.filter((d) => d.category !== '套餐')
 
-    // 筛选符合条件的菜品
-    const recommended = allDishes.filter((dish) => {
-      const nutrition = dish.nutrition as { calories?: number } | null
+    // 筛选套餐：根据目标热量和训练目的
+    let recommendedPackages = mealPackages.filter((dish) => {
+      const nutrition = dish.nutrition as { calories?: number; protein?: number } | null
       const dishCalories = nutrition?.calories || 0
-      return dishCalories >= targetCaloriesMin && dishCalories <= targetCaloriesMax
+      // 套餐热量应在单餐目标的 80%-120% 范围内
+      const inCalorieRange = dishCalories >= mealTarget * 0.8 && dishCalories <= mealTarget * 1.2
+
+      if (preferHighProtein) {
+        // 增肌：蛋白质 > 25g
+        const protein = nutrition?.protein || 0
+        return inCalorieRange && protein > 25
+      }
+
+      if (preferLowGI) {
+        // 塑形：优先低脂低糖（碳水 < 40g）
+        const carbs = (nutrition as { carbs?: number })?.carbs || 0
+        return inCalorieRange && carbs < 40
+      }
+
+      return inCalorieRange
     })
 
-    // 如果没有完全匹配的，返回热量最接近的 3 个菜品
-    if (recommended.length === 0) {
-      const sorted = allDishes
+    // 如果没有完全匹配的套餐，选择热量最接近的 2 个
+    if (recommendedPackages.length < 2) {
+      const sortedPackages = mealPackages
         .map((dish) => ({
           ...dish,
           dishCalories: (dish.nutrition as { calories?: number } | null)?.calories || 0,
+          distance: Math.abs(((dish.nutrition as { calories?: number } | null)?.calories || 0) - mealTarget),
         }))
-        .sort((a, b) => Math.abs(a.dishCalories - caloriesBurned * 0.7) - Math.abs(b.dishCalories - caloriesBurned * 0.7))
-        .slice(0, 3)
-      return sorted
+        .sort((a, b) => a.distance - b.distance)
+        .slice(0, 2)
+      recommendedPackages = sortedPackages
+    } else {
+      recommendedPackages = recommendedPackages.slice(0, 2)
     }
 
-    return recommended.slice(0, 6)
+    return recommendedPackages.map((dish) => ({
+      ...dish,
+      recommend_reason: this.getRecommendReason(fitnessGoal, dish),
+    }))
+  }
+
+  /**
+   * 获取推荐理由
+   */
+  private getRecommendReason(fitnessGoal: string, dish: any): string {
+    const nutrition = dish.nutrition as { calories?: number; protein?: number; carbs?: number } | null
+    const protein = nutrition?.protein || 0
+    const carbs = nutrition?.carbs || 0
+
+    switch (fitnessGoal) {
+      case 'fat_loss':
+        return '适合减脂期食用，热量控制合理'
+      case 'muscle_gain':
+        if (protein > 25) {
+          return `高蛋白 ${protein}g，助力增肌恢复`
+        }
+        return '营养均衡，适合增肌期'
+      case 'body_shape':
+      default:
+        if (carbs < 40) {
+          return '低GI配方，塑形首选'
+        }
+        return '营养均衡，适合日常塑形'
+    }
   }
 
   /**

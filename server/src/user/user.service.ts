@@ -176,7 +176,7 @@ export class UserService {
 
     const { data, error } = await client
       .from('users')
-      .select('id, openid, nickname, avatar, gender, age, height, weight, role, status')
+      .select('id, openid, nickname, avatar, gender, age, height, weight, fitness_goal, role, status')
       .eq('id', userId)
       .maybeSingle();
 
@@ -202,6 +202,7 @@ export class UserService {
     weight?: string;
     nickname?: string;
     avatar?: string;
+    fitness_goal?: string;
   }) {
     const client = getSupabaseClient();
 
@@ -215,12 +216,13 @@ export class UserService {
     if (info.weight !== undefined) updateData.weight = info.weight;
     if (info.nickname !== undefined) updateData.nickname = info.nickname;
     if (info.avatar !== undefined) updateData.avatar = info.avatar;
+    if (info.fitness_goal !== undefined) updateData.fitness_goal = info.fitness_goal;
 
     const { data, error } = await client
       .from('users')
       .update(updateData)
       .eq('id', userId)
-      .select('id, openid, nickname, avatar, gender, age, height, weight, role, status')
+      .select('id, openid, nickname, avatar, gender, age, height, weight, fitness_goal, role, status')
       .single();
 
     if (error) {
