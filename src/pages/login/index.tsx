@@ -18,16 +18,27 @@ const LoginPage = () => {
 
     setLoading(true)
     try {
-      // 调用微信登录获取 code
-      const loginRes = await Taro.login()
-      console.log('微信登录 code:', loginRes.code)
+      // H5 环境使用模拟 code，小程序环境使用真实登录
+      const env = Taro.getEnv()
+      const isMiniApp = env === Taro.ENV_TYPE.WEAPP || env === Taro.ENV_TYPE.TT
+      let code: string
+
+      if (isMiniApp) {
+        const loginRes = await Taro.login()
+        code = loginRes.code
+      } else {
+        // H5 开发环境使用模拟 code
+        code = 'h5_mock_' + Date.now()
+      }
+
+      console.log('登录 code:', code)
 
       // 调用后端登录接口
       const res = await Network.request({
         url: '/api/user/login',
         method: 'POST',
         data: {
-          code: loginRes.code,
+          code,
         },
       })
 
