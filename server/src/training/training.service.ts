@@ -113,28 +113,62 @@ export class TrainingService {
   }
 
   /**
+   * 内部方法：查询用户完整信息
+   */
+  private async getUserInfo(userId: string) {
+    const supabase = getSupabaseClient()
+    const { data: user, error } = await supabase
+      .from('users')
+      .select('id, gender, age, height, weight, fitness_goal')
+      .eq('id', userId)
+      .single()
+
+    if (error || !user) {
+      console.error('获取用户信息失败:', error)
+      return null
+    }
+    return user
+  }
+
+  /**
+   * 检查用户是否有完整的身体数据
+   */
+  private hasCompleteBodyData(user: any): boolean {
+    return (
+      user.gender !== null &&
+      user.age !== null &&
+      user.height !== null &&
+      user.weight !== null &&
+      parseFloat(user.height) > 0 &&
+      parseFloat(user.weight) > 0 &&
+      user.age > 0
+    )
+  }
+
+  /**
    * 根据训练消耗推荐餐食（基于 BMR/TDEE 算法）
+   * 如果用户缺少身体数据，fallback 到简单逻辑
    */
   async recommendDishes(userId: string, caloriesBurned: number) {
     const supabase = getSupabaseClient()
 
     // 1. 获取用户信息
-    const { data: user, error: userError } = await supabase
-      .from('users')
-      .select('gender, age, height, weight, fitness_goal')
-      .eq('id', userId)
-      .single()
-
-    if (userError || !user) {
-      console.error('获取用户信息失败:', userError)
-      return []
+    const user = await this.getUserInfo(userId)
+    if (!user) {
+      return this.fallbackRecommend(caloriesBurned)
     }
 
-    // 2. 计算 BMR（Harris-Benedict 公式）
-    const weight = parseFloat(user.weight || '70')
-    const height = parseFloat(user.height || '170')
-    const age = user.age || 25
-    const gender = user.gender || 1
+    // 2. 检查是否有完整的身体数据，否则 fallback
+    if (!this.hasCompleteBodyData(user)) {
+      console.log('用户身体数据不完整，使用 fallback 推荐')
+      return this.fallbackRecommend(caloriesBurned)
+    }
+
+    // 3. 计算 BMR（Harris-Benedict 公式）
+    const weight = parseFloat(user.weight)
+    const height = parseFloat(user.height)
+    const age = user.age
+    const gender = user.gender
 
     let bmr: number
     if (gender === 1) {
@@ -145,10 +179,10 @@ export class TrainingService {
       bmr = 447.593 + 9.247 * weight + 3.098 * height - 4.330 * age
     }
 
-    // 3. 计算 TDEE（活动系数 1.55，中等活动量）
+    // 4. 计算 TDEE（活动系数 1.55，中等活动量）
     const tdee = bmr * 1.55
 
-    // 4. 根据训练目的计算目标摄入
+    // 5. 根据训练目的计算目标摄入
     const fitnessGoal = user.fitness_goal || 'body_shape'
     let dailyTarget: number
     let preferHighProtein = false
@@ -177,10 +211,10 @@ export class TrainingService {
         break
     }
 
-    // 5. 中餐/晚餐占每日摄入的 70%
+    // 6. 中餐/晚餐占每日摄入的 70%
     const mealTarget = dailyTarget * 0.7
 
-    // 6. 获取所有上架的菜品
+    // 7. 获取所有上架的菜品
     const { data: allDishes, error } = await supabase
       .from('dishes')
       .select('*')
@@ -188,12 +222,15 @@ export class TrainingService {
 
     if (error || !allDishes) {
       console.error('获取菜品失败:', error)
-      return []
+      return this.fallbackRecommend(caloriesBurned)
     }
 
-    // 7. 优先推荐套餐（category = '套餐'），推荐 2 个
+    // 8. 优先推荐套餐（category = '套餐'），推荐 2 个
     const mealPackages = allDishes.filter((d) => d.category === '套餐')
-    const otherDishes = allDishes.filter((d) => d.category !== '套餐')
+
+    if (mealPackages.length === 0) {
+      return this.fallbackRecommend(caloriesBurned)
+    }
 
     // 筛选套餐：根据目标热量和训练目的
     let recommendedPackages = mealPackages.filter((dish) => {
@@ -235,6 +272,41 @@ export class TrainingService {
     return recommendedPackages.map((dish) => ({
       ...dish,
       recommend_reason: this.getRecommendReason(fitnessGoal, dish),
+    }))
+  }
+
+  /**
+   * Fallback 推荐逻辑：当用户数据不完整时使用
+   * 简单根据训练消耗推荐热量匹配的菜品
+   */
+  private async fallbackRecommend(caloriesBurned: number) {
+    const supabase = getSupabaseClient()
+
+    // 推荐热量 = 训练消耗 * 0.7（单餐占比）
+    const targetCalories = caloriesBurned * 0.7
+
+    const { data: allDishes, error } = await supabase
+      .from('dishes')
+      .select('*')
+      .eq('status', 1)
+      .eq('category', '套餐')
+
+    if (error || !allDishes || allDishes.length === 0) {
+      return []
+    }
+
+    // 选择热量最接近的 2 个套餐
+    const sorted = allDishes
+      .map((dish) => ({
+        ...dish,
+        distance: Math.abs(((dish.nutrition as { calories?: number } | null)?.calories || 0) - targetCalories),
+      }))
+      .sort((a, b) => a.distance - b.distance)
+      .slice(0, 2)
+
+    return sorted.map((dish) => ({
+      ...dish,
+      recommend_reason: '根据训练消耗智能推荐',
     }))
   }
 
