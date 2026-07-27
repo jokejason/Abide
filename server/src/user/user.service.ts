@@ -134,6 +134,7 @@ export class UserService {
     weight: string;
     nickname?: string;
     phone?: string;
+    fitness_goal?: string;
   }) {
     const client = getSupabaseClient();
 
@@ -151,6 +152,10 @@ export class UserService {
 
     if (info.phone) {
       updateData.phone = this.encryptPhone(info.phone);
+    }
+
+    if (info.fitness_goal) {
+      updateData.fitness_goal = info.fitness_goal;
     }
 
     const { data, error } = await client

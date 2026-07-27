@@ -16,6 +16,7 @@ const RegisterPage = () => {
   const [age, setAge] = useState('')
   const [height, setHeight] = useState('')
   const [weight, setWeight] = useState('')
+  const [fitnessGoal, setFitnessGoal] = useState('body_shape')
   const [loading, setLoading] = useState(false)
 
   const validateForm = (): boolean => {
@@ -56,6 +57,7 @@ const RegisterPage = () => {
           age: Number(age),
           height: height,
           weight: weight,
+          fitness_goal: fitnessGoal,
         },
       })
 
@@ -164,6 +166,29 @@ const RegisterPage = () => {
                 onInput={(e) => setWeight(e.detail.value)}
               />
             </View>
+          </View>
+
+          {/* 训练目的 */}
+          <View>
+            <Label className="text-foreground text-sm font-medium mb-3 block">
+              训练目的
+            </Label>
+            <RadioGroup value={fitnessGoal} onValueChange={setFitnessGoal}>
+              <View className="flex flex-col gap-3">
+                <View className="flex items-center gap-2">
+                  <RadioGroupItem value="fat_loss" />
+                  <Label className="text-foreground">减脂</Label>
+                </View>
+                <View className="flex items-center gap-2">
+                  <RadioGroupItem value="muscle_gain" />
+                  <Label className="text-foreground">增肌</Label>
+                </View>
+                <View className="flex items-center gap-2">
+                  <RadioGroupItem value="body_shape" />
+                  <Label className="text-foreground">塑形</Label>
+                </View>
+              </View>
+            </RadioGroup>
           </View>
         </CardContent>
       </Card>
